@@ -1,0 +1,74 @@
+---
+title: "TypeScript Generics, Explained the Way I Wish Someone Had"
+description: "Generics finally clicked for me once I stopped thinking of them as 'advanced TypeScript' and started thinking of them as function parameters for types."
+date: "2026-06-15"
+tags: ["TypeScript"]
+coverImage: "/images/cover-typescript-generics.svg"
+---
+
+For a long time, generics were the TypeScript feature I'd copy-paste around without really understanding. The angle brackets felt like ceremony. What changed things was a small reframe: **a generic is just a parameter, but for a type instead of a value.**
+
+## The problem generics solve
+
+Without generics, a function that returns whatever you pass in has to give up type information:
+
+```ts
+function identity(value: any): any {
+  return value;
+}
+
+const result = identity("hello"); // typed as `any`, not `string`
+```
+
+`any` works, but it throws away everything TypeScript knows. Adding a type parameter fixes that:
+
+```ts {1}
+function identity<T>(value: T): T {
+  return value;
+}
+
+const result = identity("hello"); // typed as `string`
+```
+
+`T` is filled in automatically based on whatever you pass — exactly like a function argument, just one level up.
+
+## Where it actually paid off
+
+The moment generics stopped feeling academic was writing a small `fetchJSON` helper:
+
+```ts title="lib/fetch-json.ts"
+async function fetchJSON<T>(url: string): Promise<T> {
+  const response = await fetch(url);
+  return response.json() as T;
+}
+
+interface User {
+  id: number;
+  name: string;
+}
+
+const user = await fetchJSON<User>("/api/user");
+// `user` is typed as `User`, not `any`
+```
+
+Every call site tells the function what shape to expect back, and TypeScript carries that all the way through — no casting scattered across the codebase.
+
+## Constraints narrow things down
+
+Sometimes you want a generic, but not *any* type — just anything with a certain shape. `extends` handles that:
+
+```ts
+function getLength<T extends { length: number }>(value: T): number {
+  return value.length;
+}
+
+getLength("hello");      // ok, strings have length
+getLength([1, 2, 3]);    // ok, arrays have length
+getLength(42);            // error, numbers don't
+```
+
+That single constraint made a lot of utility-type code in libraries I'd read before finally make sense in hindsight.
+
+## Takeaway
+
+Generics aren't a separate, "advanced" language — they're the same parameter idea applied to types. Once that clicked, a lot of previously-intimidating library code became genuinely readable.

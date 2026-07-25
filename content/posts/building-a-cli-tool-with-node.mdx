@@ -1,0 +1,62 @@
+---
+title: "Building a Tiny CLI Tool with Node.js"
+description: "Notes from building my first command-line tool with Node.js: argument parsing, file I/O, and packaging it so `npx` can run it."
+date: "2026-05-02"
+tags: ["Node.js", "CLI"]
+---
+
+I wanted a small tool that renames a batch of files based on a pattern, and figured it would be a good excuse to learn how CLI tools are actually put together in Node.js. Here's what I picked up.
+
+## Reading arguments
+
+Node gives you raw arguments through `process.argv`, where the first two entries are the node binary and the script path:
+
+```js title="bin/rename.js"
+const args = process.argv.slice(2);
+const [pattern, replacement] = args;
+
+if (!pattern || !replacement) {
+  console.error("Usage: rename <pattern> <replacement>");
+  process.exit(1);
+}
+```
+
+For anything beyond a couple of positional arguments, a parsing library pays for itself quickly, but writing it by hand first was a good way to actually understand what those libraries are doing under the hood.
+
+## Making it executable
+
+Two things turn a regular script into something `npx` and global installs can run:
+
+```js title="bin/rename.js" {1}
+#!/usr/bin/env node
+console.log("Renaming files...");
+```
+
+That shebang line tells the shell which interpreter to use, and the `bin` field in `package.json` tells npm what command name should point at the file:
+
+```json title="package.json"
+{
+  "name": "tiny-renamer",
+  "bin": {
+    "tiny-renamer": "./bin/rename.js"
+  }
+}
+```
+
+## Reading the filesystem safely
+
+The last piece was iterating over a directory and renaming matches without clobbering anything unexpected:
+
+```js
+import { readdirSync, renameSync } from "node:fs";
+
+const files = readdirSync(".");
+
+for (const file of files) {
+  if (file.includes(pattern)) {
+    renameSync(file, file.replace(pattern, replacement));
+  }
+}
+```
+
+It's a tiny tool, but building it end to end — args in, files renamed, published so `npx tiny-renamer` works from anywhere — made CLI tooling feel a lot less like magic.
