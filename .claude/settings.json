@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /home/mostapha/miniconda3 -name \"libnspr4.so\" -o -name \"libnss3.so\" 2>/dev/null | head -10)",
+      "Read(//home/mostapha/miniconda3/**)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/blog)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(disown)",
+      "Bash(echo \"started pid $!\")",
+      "Bash(timeout 30 bash -c 'until curl -sf http://localhost:3000 >/dev/null; do sleep 1; done')",
+      "Bash(curl -s -o /dev/null -w \"home: %{http_code}\\\\n\" http://localhost:3000/)",
+      "Bash(curl -s -o /dev/null -w \"blog: %{http_code}\\\\n\" http://localhost:3000/blog)",
+      "Bash(curl -s -o /dev/null -w \"post: %{http_code}\\\\n\" http://localhost:3000/blog/typescript-generics-explained)",
+      "Bash(curl -s http://localhost:3000/blog)",
+      "Bash(grep -o 'mt-2 text-muted-foreground\">.\\\\{0,80\\\\}')",
+      "Bash(curl -s http://localhost:3000/blog/typescript-generics-explained)",
+      "Bash(grep -o '<code[^>]*data-theme[^>]*>.\\\\{0,600\\\\}')",
+      "Bash(curl -s http://localhost:3000/_next/static/css/*.css)",
+      "Bash(python3 - /home/mostapha/Blog/.next/dev/static/chunks/styles_globals_css_1igg3k2._.single.css)",
+      "Bash(grep -o '<figure[^>]*>.\\\\{0,150\\\\}')",
+      "Bash(lsof -ti:3000 -sTCP:LISTEN)",
+      "Bash(xargs -r kill -9)",
+      "Bash(kill -9 21474 21571 24593)",
+      "Bash(lsof -ti:3000)",
+      "Bash(fuser 3000/tcp)",
+      "Bash(kill -9 21488 24605 25356 25357 25369)",
+      "Bash(fuser -k 3000/tcp)",
+      "Bash(gh auth *)",
+      "Bash(git add *)"
+    ]
+  }
+}
