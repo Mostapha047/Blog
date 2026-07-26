@@ -1,0 +1,107 @@
+---
+title: "Attention Is All You Need, Actually Explained"
+description: "Working through the 2017 Transformer paper: why RNNs were the bottleneck, what queries/keys/values actually are, and the diagrams that finally made self-attention click."
+date: "2026-07-26"
+tags: ["Deep Learning", "AI Engineering"]
+coverImage: "/images/cover-attention-is-all-you-need.svg"
+---
+
+<Callout type="note" title="Where this comes from">
+  "Attention Is All You Need" (Vaswani et al., 2017) is the paper that introduced the Transformer — the architecture behind basically every model I use day to day. I'd used the term "self-attention" for years without being able to describe what it computes. These are the notes from finally sitting down and working through the mechanism itself.
+</Callout>
+
+## The problem with reading one word at a time
+
+Before Transformers, sequence models were recurrent: to understand word 50 in a sentence, the model first had to process words 1 through 49, carrying everything relevant forward in a single hidden state.
+
+```text
+Sequential (RNN)
+
+x1 → h1 → h2 → h3 → h4 → h5 → ...
+```
+
+Two consequences fall out of that one design choice. First, it's slow to train — step 5 literally cannot start until step 4 finishes, so there's no parallelizing across the sequence. Second, and worse, it's lossy: anything word 1 contributes to word 50's understanding has to survive being compressed through 49 intermediate hidden states.
+
+<Callout type="warning" title="The failure mode this causes">
+  Long-range dependencies degrade with distance in an RNN — a pronoun on line 40 that refers back to a name on line 2 is exactly the case recurrent models handle worst, because that information has been repeatedly overwritten by everything in between.
+</Callout>
+
+The Transformer's answer is to throw out recurrence entirely. Every token looks directly at every other token, in one step, regardless of distance:
+
+```text
+Parallel (self-attention)
+
+x1  x2  x3  x4  x5
+ \   \  |   /   /
+   every token attends to
+   every other token, at once
+```
+
+No sequential dependency between steps means the whole sequence can be processed in parallel on a GPU — which is as much of what made Transformers practical as anything about accuracy.
+
+## Queries, keys, and values are just a lookup
+
+The mechanism that replaces recurrence is self-attention, and the part that took the longest to click was that Query, Key, and Value are not three different kinds of data — they're the same token embedding, projected three different ways for three different jobs:
+
+| Vector | Question it answers | Rough analogy |
+|---|---|---|
+| **Query (Q)** | What is this token looking for? | The search box |
+| **Key (K)** | What does each token have to offer? | The index tags on a document |
+| **Value (V)** | What content should get pulled if it's a match? | The document itself |
+
+Every token emits a Query (what it wants to know) and a Key (what it advertises), and every other token's relevance is scored by how well its Key matches that Query. The scores decide how much of each token's Value gets blended into the output:
+
+```python title="attention.py"
+def attention(Q, K, V, d_k):
+    scores = Q @ K.T / sqrt(d_k)  # how well each query matches each key
+    weights = softmax(scores, axis=-1)  # turn scores into a distribution
+    return weights @ V  # weighted blend of values, per query
+```
+
+<Callout type="tip" title="Why divide by √d_k">
+  As the dimension of Q and K grows, raw dot products grow with it and push softmax into regions where the gradient is nearly flat — the model stops learning from those scores. Dividing by √d_k keeps the scores in a range where softmax still has a useful gradient, regardless of how large the embedding dimension is.
+</Callout>
+
+## Multi-head attention runs the lookup several times
+
+A single attention computation gives the model exactly one notion of "relatedness" between tokens. Multi-head attention runs several of these in parallel, each with its own learned Q/K/V projections, then concatenates the results:
+
+| | Single head | Multi-head |
+|---|---|---|
+| Relatedness captured | one pattern | several, learned independently (e.g. syntax, coreference, adjacency) |
+| Q/K/V projections | one shared set | one set per head |
+| Output | one weighted blend | concatenation of all heads, projected back down |
+
+This is the detail that made "attention heads specialize" stop being a hand-wavy claim for me — there's nothing in the architecture forcing specialization, it's just that gradient descent finds it useful to have different heads solve different sub-problems once they're free to learn independently.
+
+## Order has to be added back in explicitly
+
+<Callout type="warning" title="Self-attention is permutation-invariant">
+  Nothing about the mechanism above uses token position — shuffle the input tokens and self-attention produces the same set of outputs, just shuffled the same way. "The dog bit the man" and "the man bit the dog" would attend identically without an explicit fix.
+</Callout>
+
+The paper's fix is a positional encoding — a fixed pattern of sine and cosine waves at different frequencies, added directly to each token's embedding before it ever reaches an attention layer, so position becomes part of the content being compared rather than a separate mechanism.
+
+## How it all stacks up
+
+The full architecture is just these pieces stacked N times, in two halves that talk to each other:
+
+```text
+        Encoder                          Decoder
+  ┌───────────────────┐           ┌────────────────────┐
+  │  Self-Attention    │           │  Masked Self-Attn   │
+  │        ↓           │           │        ↓            │
+  │  Feed Forward       │──context──▶  Cross-Attention    │
+  │        ↓           │           │        ↓            │
+  │   (× N layers)     │           │  Feed Forward       │
+  └───────────────────┘           │   (× N layers)      │
+                                    └────────────────────┘
+                                              ↓
+                                     next-token probabilities
+```
+
+The decoder's self-attention is *masked* — a token can only attend to positions before it, which is what makes autoregressive generation (predicting one token, then the next, then the next) consistent with how the model was trained.
+
+## The rule of thumb I'm keeping
+
+Whenever a Transformer detail seems mysterious now, I trace it back to one of two questions: is this solving the "no recurrence means no free ordering" problem (positional encoding), or is this scaling the same Q/K/V lookup up or down (multi-head, cross-attention, masking)? Almost everything in the paper is one of those two ideas wearing different clothes.
