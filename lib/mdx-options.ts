@@ -1,4 +1,6 @@
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import rehypePrettyCode, { type Options as PrettyCodeOptions } from "rehype-pretty-code";
 
 const prettyCodeOptions: PrettyCodeOptions = {
@@ -22,7 +24,7 @@ const prettyCodePlugin: [typeof rehypePrettyCode, PrettyCodeOptions] = [
 // `SerializeOptions` from its "/rsc" entry point.
 export const mdxOptions = {
   mdxOptions: {
-    remarkPlugins: [remarkGfm],
-    rehypePlugins: [prettyCodePlugin],
+    remarkPlugins: [remarkGfm, remarkMath],
+    rehypePlugins: [rehypeKatex, prettyCodePlugin],
   },
 };

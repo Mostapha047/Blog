@@ -1,0 +1,1005 @@
+---
+title: "How a 32-Billion-Parameter LLM Runs on an NVIDIA H100"
+description: "A comprehensive guide from parameters to inference, with hardware and architecture explained — parameters, matrices, HBM bandwidth, attention, KV cache, and why inference fits but full training doesn't."
+date: "2026-07-26"
+tags: ["Deep Learning", "AI Engineering"]
+---
+
+## Part 1: Fundamentals
+
+### What is a Parameter?
+
+A **parameter** (or weight) is one learned number inside the model.
+
+For example, a tiny artificial neuron might compute:
+
+$$y = 0.7x_1 - 0.2x_2 + 0.1$$
+
+Here:
+- `0.7` is a parameter
+- `-0.2` is a parameter
+- `0.1` is a parameter called a bias
+
+The inputs $x_1$ and $x_2$ change depending on the text. The parameters normally stay fixed during inference.
+
+#### What does one parameter do?
+
+One parameter controls the strength and direction of a connection:
+
+- A large positive value strengthens a signal.
+- A negative value reverses or suppresses a signal.
+- A value near zero has little effect.
+
+**But one parameter usually does not correspond to one understandable fact.** Instead, knowledge is distributed across many parameters. One parameter may contribute slightly to thousands of patterns, while one fact may depend on millions of parameters.
+
+**A useful mental model:** A parameter is a tiny adjustable dial. One dial means little by itself, but billions of dials working together produce the model's behavior.
+
+---
+
+### Parameters are Arranged in Matrices
+
+An LLM mostly stores parameters in large tables of numbers called **matrices**:
+
+$$W = \begin{bmatrix} 0.12 & -0.83 & 0.41 \\ 0.76 & 0.05 & -0.22 \end{bmatrix}$$
+
+This matrix contains six parameters.
+
+When an input vector enters:
+
+$$x = \begin{bmatrix} 1.2 \\ 0.4 \\ -0.7 \end{bmatrix}$$
+
+the GPU multiplies the matrix by the vector:
+
+$$y = Wx$$
+
+Each parameter influences how the input information is transformed.
+
+---
+
+### How Parameters Learn
+
+Initially, parameters are usually random or near-random numbers.
+
+During training:
+
+1. The model predicts the next token.
+2. Its prediction is compared with the correct token.
+3. The error is calculated.
+4. Each parameter is adjusted slightly to reduce future error.
+
+For example:
+```text
+Before training: 0.0231
+After one update: 0.0230
+After many updates: -0.4817
+```
+
+Training changes billions of these numbers repeatedly.
+
+---
+
+### A 32-Billion-Parameter Model
+
+A 32B model contains approximately:
+
+$$32,000,000,000 \text{ learned numbers}$$
+
+They are used for things such as:
+
+- Converting tokens into vectors
+- Deciding which previous tokens to attend to
+- Transforming concepts through the network
+- Producing probabilities for the next token
+
+---
+
+## Part 2: Hardware Foundation
+
+### The NVIDIA H100 SXM
+
+The **H100** is an NVIDIA GPU based on the Hopper architecture. **SXM** is the high-performance module version that plugs into specialized server boards rather than a normal PCIe slot.
+
+#### 80 GB of GPU Memory
+
+The GPU has **80 GB of HBM3 memory** physically located close to the processor. It stores:
+
+- Model weights
+- Input data
+- Activations
+- Attention/KV cache
+- Temporary calculation results
+
+This is separate from the server's normal RAM.
+
+#### 3.35 TB/s Memory Bandwidth
+
+Bandwidth measures how quickly data can move between GPU memory and the GPU's compute units.
+
+**3.35 TB/s** means it can theoretically transfer about 3.35 trillion bytes per second. High bandwidth matters because Tensor Cores need a continuous supply of model weights and input data. It is a transfer-rate measurement, not the memory's total capacity.
+
+#### Tensor Cores
+
+Tensor Cores are specialized hardware units that perform matrix multiply-and-add operations:
+
+$$D = A \times B + C$$
+
+Neural networks spend most of their time doing these matrix operations. Tensor Cores process many numbers simultaneously, making them much faster than ordinary CPU cores for AI workloads.
+
+#### Floating-Point Formats: BF16, FP16, and FP8
+
+A floating-point number normally contains:
+
+- A **sign bit**: positive or negative
+- **Exponent bits**: control how large or small the number can be
+- **Mantissa bits**: control how precisely the number is represented
+
+| Format   |  Sign | Exponent | Mantissa | Main advantage             |
+| -------- | ----: | -------: | -------: | --------------------------- |
+| FP16     | 1 bit |   5 bits |  10 bits | Better precision           |
+| BF16     | 1 bit |   8 bits |   7 bits | Much wider numerical range |
+| FP8 E4M3 | 1 bit |   4 bits |   3 bits | More FP8 precision         |
+| FP8 E5M2 | 1 bit |   5 bits |   2 bits | Larger FP8 range           |
+
+FP16 and BF16 both require **2 bytes per value**. FP8 requires only **1 byte**, so twice as many values can fit in memory and twice as many can potentially be transferred using the same bandwidth.
+
+The trade-off is:
+
+- Fewer bits → faster computation and lower memory usage
+- Fewer bits → more rounding error and a higher risk of overflow or underflow
+
+During AI inference, the H100 can use low-precision FP8 or FP16 values for matrix inputs while keeping important intermediate results in a higher-precision format.
+
+---
+
+## Part 3: Memory and Weight Storage
+
+### What "32B Weights" Means
+
+The model contains roughly 32 billion parameters, but memory usage depends on how each number is represented:
+
+| Weight format | Bytes per parameter | Approximate weight memory | Fits on 80 GB H100? |
+| ------------- | -------------------: | --------------------------: | -------------------- |
+| FP32          |                    4 |                      128 GB | No                   |
+| BF16 / FP16   |                    2 |                       64 GB | Yes, but tightly     |
+| FP8 / INT8    |                    1 |                       32 GB | Yes                  |
+| INT4          |                  0.5 |                       16 GB | Yes                  |
+
+**This is only the weight storage.** The GPU also needs memory for:
+
+- KV cache
+- Temporary activations
+- CUDA workspace
+- Quantization scales
+- Attention and sampling buffers
+
+Consequently, a 32B model in BF16 normally fits on an 80 GB H100 for moderate context lengths and batch sizes, but it does not leave a large amount of spare memory.
+
+The weights are not sentences or database records. They are large mathematical matrices containing learned statistical patterns.
+
+---
+
+### Loading the Model
+
+Initially, the model checkpoint is stored on SSD.
+
+```text
+SSD → CPU RAM → PCIe/NVLink → H100 HBM
+```
+
+For BF16, approximately 64 GB of weights are transferred to the H100.
+
+After loading, the weights remain in the H100's HBM. They are **not transferred from the CPU again for every token**.
+
+Inside the GPU, data moves through a hierarchy:
+
+```text
+HBM → L2 cache → shared memory/registers → Tensor Cores
+```
+
+The GPU processes small tiles of the matrices because an entire 32B model cannot be placed in the very small on-chip registers or shared memory simultaneously. IO-aware implementations such as FlashAttention reduce unnecessary movement between HBM and on-chip SRAM.
+
+---
+
+## Part 4: Token Representation and Computation
+
+### Turning Your Prompt into Tokens
+
+Suppose the prompt is:
+
+```text
+The capital of France is
+```
+
+A tokenizer running primarily on the CPU converts it into token IDs:
+
+```text
+[791, 6864, 315, 9822, 374]
+```
+
+These integers are sent to the GPU.
+
+The model performs an embedding lookup, turning each token ID into a vector containing thousands of numbers:
+
+```text
+token ID → embedding vector
+```
+
+---
+
+### The Token Representation Matrix (X)
+
+$X$ represents the model's current numerical representation of every token.
+
+Suppose the input is:
+
+```text
+"The cat sleeps"
+```
+
+After tokenization, the model might have three tokens:
+
+```text
+"The"   "cat"   "sleeps"
+```
+
+Each token is converted into a vector of numbers. If the model's hidden size were 4, a simplified $X$ might be:
+
+$$X = \begin{bmatrix} 0.2 & -0.5 & 0.8 & 0.1 \\ 0.9 & 0.3 & -0.2 & 0.6 \\ -0.4 & 0.7 & 0.5 & 0.2 \end{bmatrix}$$
+
+Each row corresponds to one token:
+
+$$X_1 = \text{representation of "The"}$$
+$$X_2 = \text{representation of "cat"}$$
+$$X_3 = \text{representation of "sleeps"}$$
+
+Each column is one learned numerical feature dimension. These dimensions usually do not have simple labels such as "animal" or "verb." Meaning is distributed across many dimensions.
+
+#### Shape of X
+
+If there are $n$ tokens and the model hidden size is $d_{\text{model}}$, then:
+
+$$X \in \mathbb{R}^{n \times d_{\text{model}}}$$
+
+For example, with:
+
+- 2,000 tokens
+- Hidden size 8,192
+
+The shape is: $X: 2000 \times 8192$
+
+So $X$ contains one 8,192-number vector for every token.
+
+#### At the First Layer
+
+At the beginning, $X$ comes mainly from token embeddings plus positional information:
+
+$$X = \text{TokenEmbeddings} + \text{PositionInformation}$$
+
+The token embedding represents what the token is. The position information represents where it occurs.
+
+#### At Later Layers
+
+After each transformer layer, $X$ changes.
+
+For example, the initial representation of `"bank"` may be ambiguous. After attention processes the sentence:
+
+```text
+"He deposited money at the bank"
+```
+
+Its representation becomes more associated with a financial institution. In:
+
+```text
+"He sat on the river bank"
+```
+
+It becomes more associated with the edge of a river.
+
+Therefore, $X$ is called the **current token representation** because it becomes increasingly context-aware as it moves through the layers.
+
+---
+
+## Part 5: Transformer Architecture
+
+### What Happens in Each Transformer Layer
+
+A 32B model might have approximately 50–70 transformer layers, although the exact architecture varies.
+
+Each token passes through every layer. A simplified layer looks like:
+
+```text
+Input vector
+    │
+    ├── Normalization
+    │
+    ├── Attention
+    │     ├── Q projection
+    │     ├── K projection
+    │     ├── V projection
+    │     ├── Q × previous K values
+    │     ├── Softmax
+    │     └── Weighted combination of V
+    │
+    ├── Residual connection
+    │
+    ├── Normalization
+    │
+    ├── MLP / feed-forward network
+    │
+    └── Residual connection
+```
+
+Transformers use attention and feed-forward matrix operations rather than processing language through explicit handwritten rules.
+
+---
+
+### Attention: Creating Q, K, V
+
+The current hidden vector $X$ is multiplied by three learned matrices:
+
+$$Q = XW_Q$$
+$$K = XW_K$$
+$$V = XW_V$$
+
+Where:
+
+- $X$: current token representations
+- $W_Q$: learned query-weight matrix
+- $W_K$: learned key-weight matrix
+- $W_V$: learned value-weight matrix
+
+So **Q, K, and V are calculated values**, while $W_Q, W_K, W_V$ are model parameters.
+
+A helpful interpretation:
+
+- **Query:** What information is this token looking for?
+- **Key:** What kind of information does this token contain?
+- **Value:** What information should be returned if this token is selected?
+
+---
+
+### The Scaled Dot-Product Attention Equation
+
+The full attention equation is:
+
+$$\operatorname{Attention}(Q,K,V) = \operatorname{softmax}\left(\frac{QK^T}{\sqrt{d_k}} + M\right)V$$
+
+#### 1. Matching Queries with Keys: $QK^T$
+
+Each query is compared with every key using a dot product:
+
+$$QK^T$$
+
+Suppose the sentence is:
+
+```text
+The animal did not cross the street because it was tired
+```
+
+When processing **"it"**, its query may match strongly with the key belonging to **"animal."**
+
+The resulting score matrix might look conceptually like:
+
+$$QK^T = \begin{bmatrix} 2.1 & 0.3 & -0.5 \\ 0.7 & 3.2 & 0.1 \\ 1.8 & 0.4 & 2.5 \end{bmatrix}$$
+
+Every row represents one querying token. Every column represents a token being examined.
+
+A large score means: The querying token considers this earlier token relevant.
+
+#### 2. Scaling by $\sqrt{d_k}$
+
+$$\frac{QK^T}{\sqrt{d_k}}$$
+
+Here, $d_k$ is the number of dimensions in each key/query vector.
+
+For example, if each attention head uses 128 dimensions:
+
+$$\sqrt{d_k} = \sqrt{128} \approx 11.31$$
+
+Dot products become larger as vector dimension increases. Dividing by $\sqrt{d_k}$ keeps the scores in a manageable range.
+
+Without scaling, softmax could become extremely sharp:
+
+```text
+Before scaling: [25, 3, -4]
+After softmax:   [almost 1, almost 0, almost 0]
+```
+
+Scaling helps training remain numerically stable.
+
+#### 3. The Causal Mask: $M$
+
+In a generative LLM, a token must not see future tokens.
+
+For the sequence:
+
+```text
+A B C D
+```
+
+The attention permissions look like:
+
+```text
+A → A
+B → A B
+C → A B C
+D → A B C D
+```
+
+The causal mask adds negative infinity to forbidden positions:
+
+$$M = \begin{bmatrix} 0 & -\infty & -\infty & -\infty \\ 0 & 0 & -\infty & -\infty \\ 0 & 0 & 0 & -\infty \\ 0 & 0 & 0 & 0 \end{bmatrix}$$
+
+After softmax, positions containing $-\infty$ receive probability zero.
+
+#### 4. Softmax Converts Scores to Weights
+
+Softmax transforms the scores into positive numbers that sum to 1.
+
+For example:
+
+$$[2.0,\ 1.0,\ 0.0]$$
+
+becomes approximately:
+
+$$[0.665,\ 0.245,\ 0.090]$$
+
+These are attention weights. They mean:
+
+```text
+66.5% attention to token 1
+24.5% attention to token 2
+ 9.0% attention to token 3
+```
+
+Softmax is applied separately to each query token's row.
+
+#### 5. Multiplying by V
+
+The attention probabilities are multiplied by the value vectors:
+
+$$\operatorname{softmax}\left(\frac{QK^T}{\sqrt{d_k}} + M\right)V$$
+
+Suppose the weights are:
+
+$$[0.7,\ 0.2,\ 0.1]$$
+
+Then the output is:
+
+$$0.7V_1 + 0.2V_2 + 0.1V_3$$
+
+So the result is a weighted mixture of the information contained in the value vectors.
+
+**The keys determine how much attention each token receives. The values determine what information is retrieved.**
+
+---
+
+### Multi-Head Attention
+
+Transformers normally perform the attention operation several times in parallel.
+
+Each attention head has different learned matrices:
+
+$$Q_i = XW_{Q_i}, \quad K_i = XW_{K_i}, \quad V_i = XW_{V_i}$$
+
+Then:
+
+$$\text{head}_i = \operatorname{Attention}(Q_i, K_i, V_i)$$
+
+Different heads can learn different relationships, such as:
+
+- Grammatical dependencies
+- Token proximity
+- Name references
+- Quotation boundaries
+- Positional patterns
+- Long-range relationships
+
+The heads are concatenated:
+
+$$H = \operatorname{Concat}(\text{head}_1, \text{head}_2, \ldots, \text{head}_h)$$
+
+Then another learned matrix mixes them:
+
+$$\text{MultiHeadAttention}(X) = HW_O$$
+
+Where $W_O$ is the attention output projection matrix.
+
+---
+
+### The Complete Attention Flow
+
+A complete flow is:
+
+$$Q = XW_Q, \quad K = XW_K, \quad V = XW_V$$
+
+$$A = \operatorname{softmax}\left(\frac{QK^T}{\sqrt{d_k}} + M\right)$$
+
+$$Z = AV$$
+
+$$O = ZW_O$$
+
+Where:
+
+- $A$: attention probability matrix
+- $Z$: weighted value information
+- $W_O$: learned output projection
+- $O$: final attention output
+
+Then the model usually adds the original input through a residual connection:
+
+$$X_{\text{next}} = X + O$$
+
+After normalization, this passes into the layer's feed-forward network.
+
+**So the whole idea is:**
+
+```text
+Input X
+   ↓
+Create Q, K, V
+   ↓
+Compare Q against K
+   ↓
+Scale and mask scores
+   ↓
+Softmax produces attention percentages
+   ↓
+Use percentages to mix V
+   ↓
+Combine attention heads with Wₒ
+   ↓
+Add original input
+```
+
+**The most important distinction:**
+
+$$\boxed{Q \text{ and } K \text{ decide where to look; } V \text{ supplies what is retrieved.}}$$
+
+---
+
+### Feed-Forward Network
+
+The attention output then passes through a much larger MLP, often using a gated activation such as SwiGLU:
+
+$$y = W_2\left(\operatorname{SiLU}(W_1 x) \odot W_3 x\right)$$
+
+A substantial fraction of the model's 32 billion weights usually lives in these projection and MLP matrices.
+
+The H100's Tensor Cores execute these matrix multiplications in parallel.
+
+---
+
+## Part 6: Producing the Next Token
+
+### Producing Logits
+
+After the final transformer layer, the result is projected into one value for every token in the vocabulary.
+
+For a vocabulary of 100,000 tokens:
+
+```text
+final vector → 100,000 logits
+```
+
+Example:
+
+```text
+"Paris"     14.2
+"Lyon"       8.1
+"France"     6.7
+"London"     5.9
+...
+```
+
+### Decoding
+
+The logits are converted into probabilities. A decoding method then selects a token using greedy selection, temperature, top-k or top-p sampling.
+
+The selected token might be:
+
+```text
+Paris
+```
+
+That token is appended to the input, and the process repeats:
+
+```text
+Prompt → token 1 → token 2 → token 3 → ...
+```
+
+**During inference, the model weights remain unchanged.**
+
+---
+
+## Part 7: Memory Beyond Weights
+
+**Because the weights are only the model's stored knowledge.** To actually use those weights on a prompt, the GPU must also store the changing intermediate data produced during computation.
+
+A useful analogy is:
+
+- **Weights** = the machine's permanent machinery
+- **KV cache and activations** = the material currently moving through the machine
+- **Workspace and buffers** = temporary worktables
+- **Quantization scales** = instructions for interpreting compressed numbers
+
+---
+
+### 1. KV Cache
+
+During attention, every token creates a key vector and a value vector:
+
+$$K = XW_K, \quad V = XW_V$$
+
+When generating the next token, the model needs the keys and values from all previous tokens.
+
+Without a cache, it would repeatedly recompute them:
+
+```text
+Generate token 1001:
+recalculate K and V for tokens 1–1000
+
+Generate token 1002:
+recalculate K and V for tokens 1–1001
+```
+
+Instead, the GPU stores them:
+
+```text
+KV cache:
+token 1 → K₁, V₁
+token 2 → K₂, V₂
+token 3 → K₃, V₃
+...
+```
+
+Then the new query compares itself with the stored keys:
+
+$$Q_{\text{new}} K_{\text{previous}}^T$$
+
+and retrieves a mixture of the stored values.
+
+#### Why Memory Grows
+
+Every additional token adds new key and value vectors for every transformer layer.
+
+Therefore KV memory grows with:
+
+$$\text{batch size} \times \text{context length} \times \text{number of layers}$$
+
+Longer conversations and more simultaneous users require more KV-cache memory.
+
+#### KV Cache Memory Formula
+
+A useful approximation is:
+
+$$\text{KV memory} = B \times S \times L \times 2 \times H_{KV} \times D \times \text{bytes}$$
+
+Where:
+
+- $B$: batch size
+- $S$: context length
+- $L$: number of layers
+- $H_{KV}$: number of key/value heads
+- $D$: head dimension
+- $2$: separate key and value caches
+
+For an illustrative grouped-query-attention model with:
+
+- 64 layers
+- 8 KV heads
+- Head dimension 128
+- BF16 cache
+- Batch size 1
+
+The cache uses approximately:
+
+$$64 \times 2 \times 8 \times 128 \times 2 = 262{,}144 \text{ bytes per token}$$
+
+That is approximately **256 KiB per token**:
+
+|       Context | Approximate KV cache |
+| ------------: | --------------------: |
+|  2,048 tokens |               0.5 GiB |
+|  8,192 tokens |                 2 GiB |
+| 32,768 tokens |                 8 GiB |
+| 65,536 tokens |                16 GiB |
+
+These numbers are only an architecture example. Models with more KV heads consume considerably more cache memory. Batch size multiplies the requirement: four simultaneous 8K requests would use roughly 8 GiB in this example.
+
+---
+
+### 2. Temporary Activations
+
+An activation is an intermediate result produced while the model is calculating.
+
+For example:
+
+$$Q = XW_Q$$
+
+Here:
+
+- $X$ is an activation
+- $Q$ is another activation
+- $QK^T$ produces another activation
+- Softmax produces another activation
+- The MLP produces more activations
+
+A simplified layer might temporarily hold:
+
+```text
+X
+Q
+K
+V
+attention scores
+softmax probabilities
+attention output
+MLP intermediate output
+```
+
+These are not permanent parameters. They are created, used, and often discarded or overwritten.
+
+During inference, activation memory is usually much smaller than during training because most intermediate results do not need to be retained for backward propagation.
+
+---
+
+### 3. CUDA Workspace
+
+GPU libraries sometimes need extra scratch memory to run an operation efficiently.
+
+For example, a matrix multiplication kernel may need temporary space to:
+
+- Rearrange matrix tiles
+- Accumulate partial results
+- Perform reductions
+- Choose an efficient execution algorithm
+- Synchronize work between GPU blocks
+
+This is called workspace.
+
+Conceptually:
+
+```text
+input matrices
+      ↓
+temporary scratch area
+      ↓
+final matrix result
+```
+
+The workspace does not represent model knowledge. It exists to make the GPU calculation faster or possible.
+
+Its size depends on the inference engine and kernels being used, such as CUDA, cuBLAS, TensorRT-LLM, vLLM, or another runtime.
+
+---
+
+### 4. Quantization Scales
+
+Suppose weights are compressed from BF16 to INT8.
+
+The original values might be:
+
+$$[-0.82,\ 0.31,\ 1.12,\ -0.05]$$
+
+INT8 can only store integers such as:
+
+$$[-74,\ 28,\ 101,\ -5]$$
+
+A scale value is needed to approximately reconstruct the original magnitude:
+
+$$\text{real value} \approx \text{integer value} \times \text{scale}$$
+
+For example:
+
+$$101 \times 0.0111 \approx 1.12$$
+
+Therefore, quantized models store:
+
+- Compressed integer weights
+- Scale factors
+- Sometimes zero points
+- Sometimes additional metadata
+
+Scales may be stored per tensor, per channel, or per small group of weights.
+
+So an INT4 model is not always exactly 0.5 bytes per parameter because the scales and metadata add some overhead.
+
+---
+
+### 5. Attention Buffers
+
+Attention temporarily creates matrices such as:
+
+$$S = \frac{QK^T}{\sqrt{d_k}}$$
+
+For multiple tokens, $S$ contains one score for many token-to-token relationships.
+
+For 4 tokens:
+
+$$S = \begin{bmatrix} s_{11} & s_{12} & s_{13} & s_{14} \\ s_{21} & s_{22} & s_{23} & s_{24} \\ s_{31} & s_{32} & s_{33} & s_{34} \\ s_{41} & s_{42} & s_{43} & s_{44} \end{bmatrix}$$
+
+The GPU may need memory for:
+
+- Attention scores
+- Causal masks
+- Softmax results
+- Output accumulation
+- Sequence-position metadata
+
+Optimized techniques such as FlashAttention avoid storing the entire score matrix at once. They process it in smaller blocks, reducing memory use.
+
+---
+
+### 6. Sampling Buffers
+
+After the last layer, the model produces logits:
+
+$$\text{logits} \in \mathbb{R}^{\text{vocabulary size}}$$
+
+For a vocabulary of 100,000 tokens, that means approximately 100,000 scores per active sequence.
+
+The runtime may temporarily store:
+
+- Logits
+- Probabilities
+- Top-$k$ candidates
+- Cumulative probabilities for top-$p$
+- Repetition penalties
+- Random numbers used for sampling
+- The selected token IDs
+
+For example:
+
+```text
+"Paris"   → 12.8
+"London"  → 9.2
+"Lyon"    → 7.5
+...
+```
+
+These buffers help choose the next token.
+
+---
+
+### Memory Persistence Across Tokens
+
+| Memory type                | Persists across generated tokens? |
+| --------------------------- | ---------------------------------- |
+| Weights                    | Yes                                |
+| KV cache                   | Yes, and grows                    |
+| Temporary activations      | Usually no                        |
+| CUDA workspace             | Reused                            |
+| Quantization scales        | Yes                                |
+| Attention/sampling buffers | Usually reused                    |
+
+**So even when a 32B BF16 model uses around 64 GB for weights, the remaining 16 GB on an 80 GB H100 is needed to actually run the model. The weights alone are not enough.**
+
+---
+
+## Part 8: Inference Phases
+
+### Prefill
+
+The complete prompt is processed:
+
+```text
+2,000 prompt tokens → process many tokens in parallel
+```
+
+This uses large matrix-matrix multiplications and tends to utilize the Tensor Cores effectively.
+
+---
+
+### Decode
+
+The model generates one token at a time:
+
+```text
+token 2001
+token 2002
+token 2003
+...
+```
+
+For a single request, this often becomes limited by how quickly the GPU can read the weights from HBM rather than by its maximum arithmetic capability.
+
+For BF16 weights:
+
+$$\frac{64\text{ GB}}{3.35\text{ TB/s}} \approx 0.019\text{ seconds}$$
+
+So the ideal memory-bandwidth lower bound is around **19 ms per generated token**, or roughly **52 tokens/second** for a single stream. This is not a guaranteed benchmark: kernels, cache traffic, attention, quantization, model architecture and system overhead affect real performance.
+
+With FP8 weights, only about 32 GB must theoretically be streamed, potentially improving this bound. Quantization and conversion overhead mean the speedup is not always exactly two times.
+
+#### Batching Changes the Economics
+
+```text
+One weight read × many user tokens
+```
+
+The same weight tile can participate in calculations for multiple requests, increasing total throughput, although each individual request may experience more latency.
+
+---
+
+## Part 9: Why Inference Fits but Full Training Does Not
+
+### Inference Memory Requirements
+
+For inference, the principal memory requirement is:
+
+```text
+weights + KV cache + temporary buffers
+```
+
+---
+
+### Training Memory Requirements
+
+For full training with mixed-precision Adam, approximate storage might include:
+
+| Item                    | Approximate memory |
+| ----------------------- | ------------------: |
+| BF16 weights            |                64 GB |
+| BF16 gradients          |                64 GB |
+| FP32 master weights     |               128 GB |
+| FP32 Adam first moment  |               128 GB |
+| FP32 Adam second moment |               128 GB |
+| Activations and buffers |           Additional |
+
+That is already around **512 GB before activations**, so ordinary full training of a 32B model cannot fit on one 80 GB H100.
+
+It requires techniques such as:
+
+- Multiple GPUs with parameter/optimizer sharding
+- Activation checkpointing
+- ZeRO or FSDP
+- Tensor and pipeline parallelism
+
+**LoRA or QLoRA fine-tuning can be feasible** because the original weights remain frozen and only comparatively small adapter matrices are trained.
+
+---
+
+## Part 10: The Complete Mental Model
+
+Think of the H100 as an extremely fast mathematical factory:
+
+```text
+32B learned numbers stored in HBM
+              ↓
+Prompt converted into vectors
+              ↓
+Thousands of tiled matrix multiplications
+              ↓
+Attention reads relevant previous-token vectors
+              ↓
+One probability for every possible next token
+              ↓
+One token selected
+              ↓
+Repeat
+```
+
+**The GPU is not searching through 32 billion facts.** For every generated token, it repeatedly multiplies the current numerical representation by the learned weight matrices, using the resulting probability distribution to choose the next token.
+
+---
+
+## Summary: One Generated Token
+
+A simplified memory flow is:
+
+```text
+1. Read the model weights
+2. Read the current token representation
+3. Create Q, K and V activations
+4. Add the new K and V to the KV cache
+5. Compare Q with previous cached keys
+6. Use temporary attention buffers
+7. Run the MLP using temporary activations/workspace
+8. Produce vocabulary logits
+9. Use sampling buffers to select a token
+10. Discard most temporary data
+11. Keep the KV cache for the next token
+```
+
+The GPU is a specialized engine designed for exactly this task: taking learned numerical matrices and applying them repeatedly to token representations.

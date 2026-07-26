@@ -45,6 +45,11 @@ export default function RootLayout({
       className={cn("h-full antialiased", fontSans.variable, fontMono.variable)}
     >
       <body className="flex min-h-full flex-col">
+        {/* Served as a static file, not a bundled import — Turbopack's CSS
+            minifier mangles KaTeX's descendant selectors (e.g. `.katex
+            .stretchy` becomes `.katex-stretchy`), silently breaking \boxed
+            and other stretchy constructs. */}
+        <link rel="stylesheet" href="/katex.min.css" />
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           <Navbar />
           <main className="flex-1">{children}</main>
