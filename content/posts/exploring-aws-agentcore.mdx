@@ -1,0 +1,53 @@
+---
+title: "Exploring AWS AgentCore"
+description: "Notes from my first week with Amazon Bedrock AgentCore: what it actually solves, the pieces that make up the platform, and the mental model that made it click."
+date: "2026-07-26"
+tags: ["AWS", "AI Engineering"]
+---
+
+I'd built a couple of small agents the usual way — a Lambda function calling a model, a Step Functions workflow gluing tool calls together — and it worked, but every extra capability (long-running sessions, memory across turns, letting the agent browse the web) meant more infrastructure I had to design myself. AWS AgentCore is Amazon's answer to that: a set of managed services for running agents in production, regardless of which framework built them.
+
+## The problem it's actually solving
+
+Frameworks like LangGraph, CrewAI, or Strands are great at defining *what* an agent does. They don't answer *where it runs, who it's allowed to act as, or what happens to its memory between sessions*. That gap is what I kept re-solving by hand. AgentCore separates those concerns into standalone services and lets you adopt only the ones you need:
+
+- **Runtime** — a serverless environment purpose-built for agents, not request/response APIs
+- **Identity** — lets an agent authenticate as itself or on behalf of a user, without you wiring OAuth flows manually
+- **Memory** — short-term session state and long-term, extracted memory across sessions
+- **Gateway** — turns existing Lambda functions or APIs into tools an agent can discover and call
+- **Browser** and **Code Interpreter** — sandboxed, managed environments for agents that need to click around a website or execute code
+
+## Why Runtime isn't just "Lambda for agents"
+
+My first assumption was that Runtime is basically Lambda with a longer timeout. Close, but the details matter: each session runs in its own isolated microVM, sessions can run for up to eight hours instead of minutes, and it accepts the larger, multimodal payloads agent frameworks tend to produce. That isolation is the part I actually needed — with plain Lambda, keeping one user's conversation state from leaking into another's concurrent invocation was something I had to engineer myself.
+
+Wrapping an existing agent for Runtime turned out to be a thin layer, not a rewrite:
+
+```python title="agent.py" {1,5}
+from bedrock_agentcore import BedrockAgentCoreApp
+
+app = BedrockAgentCoreApp()
+
+@app.entrypoint
+def invoke(payload):
+    user_message = payload.get("prompt")
+    # Whatever agent logic already exists — LangGraph, Strands, plain
+    # boto3 calls to Bedrock — lives here unchanged.
+    response = my_existing_agent.run(user_message)
+    return {"result": response}
+
+if __name__ == "__main__":
+    app.run()
+```
+
+The decorator is the whole integration point. Everything about scaling, isolation, and session lifecycle is handled outside this file, which means the agent code stays framework-native instead of being rewritten around AWS-specific abstractions.
+
+## Gateway reframed how I think about tools
+
+The idea that clicked hardest was Gateway. Instead of hand-writing a tool schema for every Lambda function or internal API an agent should call, Gateway can front them and expose them as MCP-compatible tools automatically, with its own inbound auth in front. So "give the agent access to our internal API" stops being a bespoke integration per agent and becomes a configuration step on the API itself.
+
+## What I'm still testing
+
+Identity's "act on behalf of a user" model and Memory's short-term vs. long-term split are the two pieces I haven't pushed hard enough yet to have a real opinion on — both look like they solve problems I've only patched around with ad hoc token passing and manually summarized chat history. That's next.
+
+The rule of thumb I'm walking away with for now: reach for AgentCore pieces individually, not as an all-or-nothing platform. Runtime alone would have saved me the isolation bugs from my last project; the rest earns its place only once the agent actually needs it.
