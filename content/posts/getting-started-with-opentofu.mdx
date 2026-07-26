@@ -1,0 +1,69 @@
+---
+title: "Getting Started with OpenTofu"
+description: "My first week with OpenTofu: what it actually is versus Terraform, how state works, and the plan/apply loop that makes infrastructure-as-code click."
+date: "2026-07-24"
+tags: ["OpenTofu", "DevOps"]
+---
+
+I'd heard OpenTofu described as "just a Terraform fork" enough times that I assumed switching would be a non-event. Mechanically that's mostly true — but sitting down and actually writing configuration from scratch is what made the underlying ideas click, fork or not.
+
+## What problem this is even solving
+
+Before touching any syntax, the thing worth understanding is the goal: describe infrastructure as a declarative file instead of a sequence of clicks or CLI commands, so the same configuration can be reviewed, versioned, and re-applied identically. OpenTofu reads a `.tf` file, compares it to what actually exists, and computes a diff — nothing gets created or changed until you approve that diff.
+
+## Resources are the basic unit
+
+A resource block describes one thing that should exist:
+
+```hcl title="main.tf"
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+}
+
+provider "aws" {
+  region = "eu-west-3"
+}
+
+resource "aws_s3_bucket" "notes" {
+  bucket = "my-learning-log-notes"
+}
+```
+
+That's a complete, applyable file. `resource "aws_s3_bucket" "notes"` reads as "a resource of type `aws_s3_bucket`, referred to elsewhere in this config as `notes`" — the second name is local to the config, not the real bucket name.
+
+## Plan and apply are the whole workflow
+
+Two commands do almost everything day to day:
+
+```bash
+tofu init    # downloads providers, sets up the backend
+tofu plan    # shows exactly what would change, changes nothing
+tofu apply   # asks for confirmation, then makes the plan real
+```
+
+`tofu plan` is the part I lean on constantly — it prints a diff of adds, changes, and destroys *before* anything happens, which turns "did I just break production" into a question you can answer by reading rather than guessing.
+
+## State is the part that isn't optional
+
+The detail that actually mattered for understanding OpenTofu, not just using it: it doesn't inspect your cloud account to figure out what it manages. It keeps a state file — a JSON snapshot mapping each resource block to the real object it created — and every plan is a three-way diff between config, state, and (optionally) live infrastructure. Lose the state file and OpenTofu has no memory of what it owns, even if the infrastructure is still sitting there:
+
+```hcl title="backend.tf"
+terraform {
+  backend "s3" {
+    bucket = "my-tofu-state"
+    key    = "learning-log/terraform.tfstate"
+    region = "eu-west-3"
+  }
+}
+```
+
+Pointing the backend at remote storage like this, instead of the local `terraform.tfstate` file it creates by default, was the first change I made — a laptop being the single copy of "what infrastructure exists" felt like a bad place to be one `rm` away from.
+
+## What's next
+
+Variables and modules are the obvious next step now that a single resource makes sense — right now every value is hardcoded, which is fine for one bucket and clearly won't be for anything bigger.

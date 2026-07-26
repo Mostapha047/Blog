@@ -1,0 +1,80 @@
+---
+title: "Kubernetes, Minus the Buzzwords"
+description: "The mental model that finally made Kubernetes click for me: what a Pod actually is, why Deployments exist, and how a Service solves the one problem Pods can't solve themselves."
+date: "2026-07-20"
+tags: ["Kubernetes", "DevOps"]
+---
+
+I'd used Kubernetes for months by copy-pasting YAML I half-understood before I sat down and actually learned what each piece was doing. Turns out the whole system makes a lot more sense once you stop thinking of it as "a way to run containers" and start thinking of it as a control loop that keeps reality matching a spec you wrote down.
+
+## Everything is a reconciliation loop
+
+The core idea underneath every Kubernetes object is the same: you declare a desired state, and a controller continuously checks the cluster against it, making changes until reality matches. That's it. A Deployment isn't a command to "start 3 containers" — it's a standing instruction that says "there should always be 3 of these," which a controller re-enforces forever, including at 3am when a node dies.
+
+## Pods are the unit, not containers
+
+The detail that took longest to sink in: Kubernetes doesn't schedule containers, it schedules **Pods**, and a Pod is one or more containers that always land on the same node and share a network namespace:
+
+```yaml title="pod.yaml"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web
+spec:
+  containers:
+    - name: app
+      image: my-app:1.0
+      ports:
+        - containerPort: 3000
+```
+
+A bare Pod like this is almost never what you want in practice, though — if the node dies, the Pod dies with it, and nothing brings it back.
+
+## Why Deployments exist
+
+A Deployment wraps Pods in exactly the reconciliation loop described above:
+
+```yaml title="deployment.yaml" {6}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: app
+          image: my-app:1.0
+```
+
+`replicas: 3` is the desired state. Kill one of the resulting Pods by hand and the Deployment's controller notices the drift and schedules a replacement, unprompted. Rolling updates are the same mechanism applied to a changed `image:` — new Pods come up, old ones are drained, one batch at a time.
+
+## The problem Services quietly solve
+
+Pods are disposable and get a new IP every time they're recreated, which means nothing that talks to a Pod directly can rely on its address staying stable. A Service fixes this by giving a stable virtual IP and DNS name to whatever Pods currently match a label selector:
+
+```yaml title="service.yaml"
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 3000
+```
+
+Traffic to the Service gets load-balanced across every Pod carrying the `app: web` label, regardless of how often the Deployment replaces them underneath. That label-selector indirection — not any specific networking magic — is the trick that makes the rest of Kubernetes hang together.
+
+## The rule of thumb I'm keeping
+
+Whenever a new Kubernetes object confuses me now, I ask two questions: what desired state is it declaring, and what's the actual reconciliation loop enforcing it? Almost everything, from a Deployment to a HorizontalPodAutoscaler, is that same pattern wearing a different YAML shape.
